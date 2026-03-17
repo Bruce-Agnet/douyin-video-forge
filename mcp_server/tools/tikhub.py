@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import ssl
 import tempfile
+import time
 from typing import Any
 
 import certifi
@@ -23,6 +25,10 @@ _TIMEOUT = httpx.Timeout(30.0, connect=15.0)
 _USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 # SSL：显式加载 certifi 证书（macOS Python 的系统证书库可能为空）
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+# A2: 全局请求节流，避免连续调用触发抖音频率限制
+_LAST_REQUEST_TIME = 0.0
+_MIN_REQUEST_INTERVAL = 1.0  # 最小间隔 1 秒
 
 
 async def _do_request(
@@ -72,6 +78,15 @@ async def _tikhub_request(
     TikHub 响应结构：{ code, data: { ... 实际数据 ... }, message, ... }
     本函数自动解包外层 wrapper，返回 data 字段内容。
     """
+    global _LAST_REQUEST_TIME
+
+    # A2: 全局请求节流
+    now = time.monotonic()
+    wait = _MIN_REQUEST_INTERVAL - (now - _LAST_REQUEST_TIME)
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _LAST_REQUEST_TIME = time.monotonic()
+
     url = f"{get_tikhub_base_url()}{path}"
     headers = get_tikhub_headers()
     headers["User-Agent"] = _USER_AGENT
@@ -81,7 +96,16 @@ async def _tikhub_request(
         async with httpx.AsyncClient(
             timeout=_TIMEOUT, verify=_SSL_CONTEXT, trust_env=False,
         ) as client:
-            resp = await _do_request(client, method, url, headers, params, json)
+            try:
+                resp = await _do_request(client, method, url, headers, params, json)
+            except ToolError as e:
+                # A1: TikHub 间歇性 400 重试一次（2 秒后）
+                if "请求失败" in str(e):
+                    await asyncio.sleep(2)
+                    _LAST_REQUEST_TIME = time.monotonic()
+                    resp = await _do_request(client, method, url, headers, params, json)
+                else:
+                    raise
             try:
                 data = resp.json()
             except ValueError:
@@ -95,7 +119,16 @@ async def _tikhub_request(
         async with httpx.AsyncClient(
             timeout=_TIMEOUT, verify=_SSL_CONTEXT, trust_env=True,
         ) as client:
-            resp = await _do_request(client, method, url, headers, params, json)
+            try:
+                resp = await _do_request(client, method, url, headers, params, json)
+            except ToolError as e:
+                # A1: TikHub 间歇性 400 重试一次（2 秒后）
+                if "请求失败" in str(e):
+                    await asyncio.sleep(2)
+                    _LAST_REQUEST_TIME = time.monotonic()
+                    resp = await _do_request(client, method, url, headers, params, json)
+                else:
+                    raise
             try:
                 data = resp.json()
             except ValueError:
@@ -348,8 +381,19 @@ async def _resolve_unique_id(unique_id: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ToolError(f"搜索 {unique_id} 无结果，请确认抖音号是否正确。")
     inner = data.get("data", data)
+    # A3: "用户未登录"等字符串响应通常是抖音频率限制，等 3 秒后重试一次
     if isinstance(inner, str):
-        raise ToolError(f"抖音搜索暂时不可用（{inner}），请稍后重试。")
+        await asyncio.sleep(3)
+        data = await _tikhub_request(
+            "GET",
+            "/api/v1/douyin/web/fetch_user_search_result_v2",
+            params={"keyword": unique_id, "page": 1},
+        )
+        if not isinstance(data, dict):
+            raise ToolError(f"搜索 {unique_id} 无结果，请确认抖音号是否正确。")
+        inner = data.get("data", data)
+        if isinstance(inner, str):
+            raise ToolError(f"抖音搜索暂时不可用（{inner}），请稍后重试。")
     if isinstance(inner, dict):
         user_list = inner.get("user_list", [])
     else:
