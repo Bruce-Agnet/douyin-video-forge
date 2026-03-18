@@ -1,24 +1,31 @@
-# douyin-video-forge v2.0 产品需求文档
+# douyin-video-forge v3.0 产品需求文档
 
 ## 1. 文档信息
 
 | 项目 | 内容 |
 |------|------|
-| 版本 | v2.0 |
+| 版本 | v3.0 |
 | 日期 | 2026-03-18 |
 | 状态 | 开发中 |
-| 变更摘要 | TikHub API → 浏览器语义爬取，新增语音转写，零付费数据 API 依赖 |
+| 变更摘要 | MCP Server → 纯 Agent Skill，零配置安装，Windows 支持 |
 
-### v1.0 → v2.0 核心变化
+### 版本演进
 
-| 维度 | v1.0 | v2.0 |
-|------|------|------|
-| 数据采集 | TikHub API（付费第三方） | OpenClaw 内置浏览器（零成本） |
-| 视频下载 | TikHub 下载端点 | yt-dlp（开源） |
-| 语音转写 | 无 | faster-whisper 本地推理 |
-| 低粉高赞筛选 | Python 代码 (`filters.py`) | SKILL.md 自然语言指令 |
-| 入口门槛 | 需要 TIKHUB_API_KEY | 仅需安装 Python + FFmpeg + yt-dlp |
-| MCP 工具数 | 13 个 | 9 个 |
+| 维度 | v1.0 | v2.0 | v3.0 |
+|------|------|------|------|
+| 数据采集 | TikHub API（付费） | 浏览器（零成本） | 浏览器（零成本） |
+| 工具执行 | MCP Server (13 工具) | MCP Server (9 工具) | **bash 模板 + Python 脚本（零 MCP）** |
+| Python 依赖 | 必需 | 必需（MCP 运行时） | **可选**（仅 Kling API / 转写） |
+| 安装方式 | pip + MCP 配置 | pip 5 包 + jq + MCP 配置 | **复制文件夹** |
+| 平台 | macOS / Linux | macOS / Linux | macOS / Linux / **Windows** |
+| 入口门槛 | TIKHUB_API_KEY + Python | Python + FFmpeg + yt-dlp | **FFmpeg + yt-dlp** |
+
+### v2.0 → v3.0 核心决策
+
+v2.0 的 9 个 MCP 工具中 6 个是 CLI 薄包装（yt-dlp、ffmpeg），不值得维护 MCP Server + 依赖链。去掉 MCP Server 后：
+- 安装成本降低一个数量级（复制文件夹 vs pip install 5 包 + jq + openclaw.json 配置）
+- Windows 兼容性从"需要 WSL/conda 调试"变为"开箱即用"
+- Python 从必需降为可选（Tier 1 数据采集+脚本生成不需要 Python）
 
 ---
 
@@ -47,7 +54,7 @@
 
 ## 4. 技术架构
 
-### 新架构图
+### v3.0 架构图
 
 ```
 SKILL.md (脑) ─── 编排 ──→ OpenClaw 浏览器 (眼) → 抖音网页
@@ -57,35 +64,29 @@ SKILL.md (脑) ─── 编排 ──→ OpenClaw 浏览器 (眼) → 抖音网
     │                         ├── 竞品：douyin.com/user/<sec_uid>
     │                         └── 评论：视频页面评论区
     │
-    └── 工具调用 ──→ MCP Server (手) → 9 个工具
-                      ├── media.py (新): video_download / audio_extract / audio_transcribe
-                      ├── kling.py (保留): generate / img2video / frame / status
-                      └── video.py (改): video_concat / env_check
+    ├── bash 命令 ──→ yt-dlp（视频下载）/ ffmpeg（音视频处理）
+    │
+    └── Python 脚本 ──→ scripts/kling_api.py（Kling API）
+                        scripts/transcribe.py（语音转写）
 ```
 
 ### 目录结构
 
 ```
 douyin-video-forge/
-├── SKILL.md                    # Agent 编排指令（核心）
-├── mcp_server/                 # MCP Server（确定性工具）
-│   ├── server.py               # FastMCP 入口，flat mount 三个子 server
-│   ├── tools/
-│   │   ├── media.py            # 媒体处理 3 工具（下载/音频提取/语音转写）
-│   │   ├── kling.py            # Kling 3.0 API 4 工具（视频生成）
-│   │   └── video.py            # FFmpeg 拼接 + env_check（2 工具）
-│   └── utils/
-│       └── auth.py             # API 认证（Kling JWT）
-├── references/                 # LLM 知识库（SKILL.md 按需引用）
-│   ├── browser-navigation.md   # 抖音页面结构参考
+├── SKILL.md                     # Agent Skill 编排指令（核心）
+├── scripts/
+│   ├── kling_api.py             # Kling API CLI（JWT + 生成 + 轮询 + 帧提取）
+│   └── transcribe.py            # 语音转写 CLI（faster-whisper）
+├── references/                  # LLM 知识库（SKILL.md 按需引用）
+│   ├── browser-navigation.md
 │   ├── douyin-algorithm.md
 │   ├── kling-prompt-guide.md
 │   ├── seedance-prompt-guide.md
 │   ├── script-templates.md
 │   └── trend-analysis.md
-├── examples/                   # 示例文件
-├── install.sh                  # 一键安装脚本
-└── requirements.txt            # Python 依赖
+├── examples/                    # 示例文件
+└── install.sh                   # 前置检查 + 复制安装
 ```
 
 ### 模型推荐
@@ -164,33 +165,28 @@ douyin-video-forge/
 
 ---
 
-## 6. MCP 工具清单
+## 6. 工具清单（v3.0）
 
-共 9 个工具，分三个模块：
+v3.0 去掉 MCP Server，工具分为两类：
 
-### media.py — 媒体处理（3 个，新增）
+### bash 命令模板（5 个，SKILL.md 内联）
 
-| 工具 | 功能 | 参数 |
-|------|------|------|
-| `video_download` | yt-dlp 下载抖音视频 + 可选帧提取 | `url`, `extract_frames=False`, `frame_interval=2.0` |
-| `audio_extract` | FFmpeg 提取音频（16kHz mono WAV） | `video_path`, `output_format="wav"` |
-| `audio_transcribe` | faster-whisper 本地语音转写 | `audio_path`, `language="zh"`, `model_size="medium"` |
+| 操作 | 命令 | 原 MCP 工具 |
+|------|------|------------|
+| 视频下载 | `yt-dlp ...` | `video_download` |
+| 音频提取 | `ffmpeg -i ... -vn ...` | `audio_extract` |
+| 视频拼接 | `ffmpeg -f concat ...` | `video_concat` |
+| 帧提取 | `ffprobe + ffmpeg` | `kling_extract_frame` |
+| 环境检查 | `which ffmpeg && which yt-dlp` | `env_check` |
 
-### kling.py — 视频生成（4 个，保留）
+### Python CLI 脚本（4 个操作，2 个脚本）
 
-| 工具 | 功能 |
-|------|------|
-| `kling_generate` | 文生视频（自动轮询） |
-| `kling_generate_with_image` | 图生视频（首末帧衔接） |
-| `kling_extract_frame` | 提取视频帧 |
-| `kling_check_status` | 查询任务状态 |
-
-### video.py — 视频处理 + 系统（2 个，改）
-
-| 工具 | 功能 | 变更 |
-|------|------|------|
-| `video_concat` | FFmpeg 多段拼接 + BGM | 不变 |
-| `env_check` | 环境检查 | 重构：返回 data_ready / video_ready / voice_ready 三个标志 |
+| 脚本 | 子命令 | 功能 | 原 MCP 工具 |
+|------|--------|------|------------|
+| `kling_api.py` | `generate` | 文生视频（自动轮询） | `kling_generate` |
+| `kling_api.py` | `generate-with-image` | 图生视频（首末帧衔接） | `kling_generate_with_image` |
+| `kling_api.py` | `check-status` | 查询任务状态 | `kling_check_status` |
+| `transcribe.py` | — | 语音转写 | `audio_transcribe` |
 
 ---
 
@@ -252,13 +248,13 @@ douyin-video-forge/
 
 ### 依赖
 
-| 依赖 | 类型 | 说明 |
-|------|------|------|
-| Python >= 3.10 | 运行时 | MCP Server |
-| FFmpeg | 系统级 | 音视频处理 |
-| yt-dlp | pip | 视频下载 |
-| faster-whisper | pip（可选） | 语音转写，首次运行下载 ~1.5GB 模型 |
-| OpenClaw >= v2026.1.29 | 平台 | Agent 运行环境 |
+| 依赖 | 类型 | 必需? | 说明 |
+|------|------|-------|------|
+| FFmpeg | 系统级 | 是 | 音视频处理 |
+| yt-dlp | pip/系统 | 是 | 视频下载 |
+| python3 | 系统级 | 否 | 仅 Kling API 和语音转写需要 |
+| pyjwt + httpx | pip | 否 | Kling API JWT 签名和 HTTP |
+| faster-whisper | pip | 否 | 语音转写，首次运行下载 ~1.5GB 模型 |
 
 ### 环境变量
 
@@ -267,15 +263,17 @@ douyin-video-forge/
 | KLING_ACCESS_KEY | 否（仅视频生成） | 可灵 API |
 | KLING_SECRET_KEY | 否（仅视频生成） | 可灵 API |
 
-**v2.0 不再需要 TIKHUB_API_KEY**。
-
 ### 安装步骤
 
 ```bash
+# 推荐
+clawhub install douyin-video-forge
+
+# 或手动
 bash install.sh
 ```
 
-安装脚本自动完成：检查 OpenClaw → 复制 Skill → 安装 Python 依赖 → 检查 FFmpeg/yt-dlp → 配置 MCP Server → 可选配置 Kling Key → 验证。
+安装脚本自动完成：检查 ffmpeg/yt-dlp → 检查可选依赖 → 复制 Skill 到 `~/.openclaw/skills/` → 打印状态摘要。
 
 ---
 
@@ -286,15 +284,21 @@ metadata:
   openclaw:
     requires:
       bins:
-        - python3
         - ffmpeg
         - yt-dlp
-      env: []
+      optionalBins:
+        - python3
       optionalEnv:
         - KLING_ACCESS_KEY
         - KLING_SECRET_KEY
     emoji: "🎬"
+    os:
+      - darwin
+      - linux
+      - win32
 ```
+
+关键变化：`python3` 从 `requires.bins` → `optionalBins`；新增 `win32` 平台支持。
 
 ---
 
@@ -320,58 +324,36 @@ metadata:
 
 ---
 
-## 14. 开发计划
+## 14. 开发计划（v3.0）
 
-### Phase A：代码基础
-
-| # | 文件 | 操作 |
+| # | 内容 | 状态 |
 |---|------|------|
-| A1 | `mcp_server/tools/media.py` | 新建 3 工具 |
-| A2 | `mcp_server/server.py` | 去掉 tikhub_server，加 media_server |
-| A3 | `mcp_server/tools/video.py` | env_check 重构 |
-| A4 | `mcp_server/utils/auth.py` | 删除 TikHub 认证 |
-| A5 | `requirements.txt` | 更新依赖 |
-
-### Phase B：SKILL.md 重写（第二轮，需实测）
-
-| # | 内容 |
-|---|------|
-| B1-B5 | SKILL.md 元数据 + 环境检查 + Phase 2 重写 + Phase 3 扩展 + 错误处理 |
-
-### Phase C：清理
-
-| # | 文件 | 操作 |
-|---|------|------|
-| C1 | `mcp_server/tools/tikhub.py` | 删除 |
-| C2 | `mcp_server/utils/filters.py` | 删除 |
-
-### Phase D：文档
-
-| # | 文件 | 操作 |
-|---|------|------|
-| D1 | `PRD.md` | 完整重写 v2.0 |
-| D2 | `references/browser-navigation.md` | 新建（第二轮） |
-| D3 | `install.sh` | 更新 |
-| D4 | `CLAUDE.md` | 更新 |
-| D5 | `README.md` | 更新 |
+| 1 | 创建 `scripts/kling_api.py`（从 MCP 移植，async→sync） | 完成 |
+| 2 | 创建 `scripts/transcribe.py`（从 MCP 移植） | 完成 |
+| 3 | 改造 SKILL.md（MCP 调用 → bash/script 命令） | 完成 |
+| 4 | 精简 install.sh（390 行 → ~60 行） | 完成 |
+| 5 | 更新 CLAUDE.md / PRD.md / README.md | 完成 |
+| 6 | 删除 `mcp_server/` 和 `requirements.txt` | 完成 |
+| 7 | 验证（语法检查 + CLI 可用性） | 完成 |
 
 ---
 
 ## 15. 迁移指南
 
-### v1.0 → v2.0 升级步骤
+### v2.0 → v3.0 升级步骤
 
 1. **更新代码**：`git pull` 获取最新代码
-2. **安装新依赖**：`pip install -r requirements.txt`（新增 yt-dlp、faster-whisper）
-3. **删除旧环境变量**：TIKHUB_API_KEY 不再需要，可从环境变量和 openclaw.json 中移除
-4. **更新 MCP 配置**：重新运行 `bash install.sh` 更新 openclaw.json
-5. **验证**：运行 `env_check` 确认三个就绪标志
+2. **重新安装**：`bash install.sh`（会自动清理旧的 MCP 相关文件）
+3. **清理 MCP 配置**：从 `~/.openclaw/openclaw.json` 的 `mcpServers` 中移除 `douyin-video-forge` 条目
+4. **可选**：`pip install pyjwt httpx`（仅 Kling API 需要）
 
-### 破坏性变更
+### v3.0 破坏性变更
 
-- 删除 7 个 TikHub 工具（tikhub_hot_list 等）
-- 删除 filters.py（低粉高赞筛选迁至 SKILL.md 自然语言指令）
-- env_check 返回值变更：phase1_ready / phase2_ready → data_ready / video_ready / voice_ready
+- 删除 `mcp_server/` 目录和 `requirements.txt`
+- 删除 9 个 MCP 工具 → 替换为 bash 命令模板 + Python CLI 脚本
+- 不再需要 fastmcp、jq 依赖
+- `openclaw.json` 中不再需要 MCP Server 配置
+- python3 从必需降为可选
 
 ---
 

@@ -8,9 +8,10 @@ metadata:
   openclaw:
     requires:
       bins:
-        - python3
         - ffmpeg
         - yt-dlp
+      optionalBins:
+        - python3
       optionalEnv:
         - KLING_ACCESS_KEY
         - KLING_SECRET_KEY
@@ -18,6 +19,7 @@ metadata:
     os:
       - darwin
       - linux
+      - win32
 ---
 
 ## 身份与激活
@@ -29,19 +31,32 @@ metadata:
 工作原则：
 - **数据驱动**：内容决策基于实时热点数据
 - **确认驱动**：关键阶段须经运营确认后继续
-- **确定性优先**：API 调用和视频处理由 MCP 工具执行，你负责创意分析和脚本创作
+- **确定性优先**：视频处理和 API 调用由 bash 命令和 Python 脚本执行，你负责创意分析和脚本创作
 - **安全合规**：绝不在对话中要求输入 API Key，绝不直接复制爆款内容
 
 ---
 
 ## 环境检查
 
-**首次激活时必须先调用 `env_check`（无参数）**，检查 Python >= 3.10、FFmpeg、yt-dlp 和可选依赖。
+**首次激活时执行以下 bash 检查**：
 
-`env_check` 返回三个就绪标志：
-- `data_ready: true` → 数据采集 + 脚本生成可用（Python 3.10+ / FFmpeg / yt-dlp，无需任何 API Key）
-- `video_ready: true` → AI 视频生成可用（需要可灵 API Key + 网络连通）
-- `voice_ready: true` → 语音转写可用（faster-whisper 已安装）
+```bash
+# 必需工具检查
+which ffmpeg && which yt-dlp
+```
+
+两者都存在 → `data_ready=true`。
+
+如果设置了 `KLING_ACCESS_KEY` 和 `KLING_SECRET_KEY`：
+```bash
+python3 ~/.openclaw/skills/douyin-video-forge/scripts/kling_api.py check-connectivity
+```
+返回 `"status": "ok"` → `video_ready=true`。
+
+```bash
+python3 -c "import faster_whisper" 2>/dev/null
+```
+成功 → `voice_ready=true`。
 
 发现问题时的处理：
 - 缺 yt-dlp → `pip install yt-dlp`
@@ -187,19 +202,20 @@ metadata:
 
 ### 步骤 3：行业趋势补充（web_search）
 
-使用你的网络搜索能力（非 MCP 工具）搜索「<行业关键词> 最新趋势 抖音」，补充行业背景信息。此步骤与浏览器无关，方式不变。
+使用你的网络搜索能力搜索「<行业关键词> 最新趋势 抖音」，补充行业背景信息。
 
-### 步骤 4：头部视频深度分析（浏览器 + MCP）
+### 步骤 4：头部视频深度分析（浏览器 + 命令行）
 
 从步骤 2 筛选结果中，选取数据表现最好的 1-2 个视频。首日**必须**执行，后续每日可跳过（除非策略方向调整）。
 
 **4a. 下载视频**：
 
-```
-video_download(url="<视频链接>")
+```bash
+TMPDIR=$(mktemp -d -t dvf_download_XXXX)
+yt-dlp --no-warnings -f best --no-playlist -o "$TMPDIR/%(id)s.%(ext)s" "<视频链接>"
 ```
 
-返回本地视频文件路径。
+返回下载后的视频文件路径。
 
 **4b. 关键帧分析**：
 
@@ -210,14 +226,15 @@ video_download(url="<视频链接>")
 
 **4c. 语音转写**：
 
-```
-audio_extract(video_path="<视频路径>")
+提取音频：
+```bash
+ffmpeg -i "<视频路径>" -vn -acodec pcm_s16le -ar 16000 -ac 1 "<视频路径>.wav" -y
 ```
 
-提取音频后：
-
-```
-audio_transcribe(audio_path="<音频路径>")
+转写（`voice_ready=true` 时）：
+```bash
+python3 ~/.openclaw/skills/douyin-video-forge/scripts/transcribe.py \
+  --audio "<音频路径>" --language zh --model medium
 ```
 
 获取视频口播文本，用于后续脚本结构分析。
@@ -260,7 +277,7 @@ audio_transcribe(audio_path="<音频路径>")
 
 步骤 4c 的语音转写按以下优先级执行：
 
-1. **faster-whisper 本地转写**（`voice_ready: true` 时）：调用 `audio_transcribe(audio_path="<路径>")`，精度最高
+1. **faster-whisper 本地转写**（`voice_ready: true` 时）：执行 `transcribe.py` 命令，精度最高
 2. **浏览器读取抖音 AI 章节要点**（`voice_ready: false` 时）：在视频详情页查找「AI 总结」或「章节要点」区域，直接阅读平台提供的内容摘要
 3. **跳过转写**：以上均不可用时，仅依赖视觉帧分析，记录"该视频未获取口播文本"
 
@@ -368,14 +385,14 @@ audio_transcribe(audio_path="<音频路径>")
 
 ## Phase 4→5 门控检查
 
-在进入 Phase 5 前，检查 `env_check` 返回的 `video_ready` 字段：
+在进入 Phase 5 前，检查 `video_ready` 状态：
 
 - **`video_ready: true`** → 继续进入 Phase 5
 - **`video_ready: false`** → 向运营展示以下提示，**不进入 Phase 5-6**：
 
 > ✅ 脚本已完成！双版本脚本（可灵版 + Seedance 版）已生成，可直接用于手动制作。
 >
-> ⚠️ 视频自动生成（Phase 5-6）需要配置可灵 API 密钥。请在环境变量中设置 `KLING_ACCESS_KEY` 和 `KLING_SECRET_KEY` 后重新运行 `env_check` 验证。
+> ⚠️ 视频自动生成（Phase 5-6）需要配置可灵 API 密钥。请在环境变量中设置 `KLING_ACCESS_KEY` 和 `KLING_SECRET_KEY` 后重新运行环境检查验证。
 >
 > 获取地址：https://klingai.com → API 管理
 
@@ -387,16 +404,13 @@ audio_transcribe(audio_path="<音频路径>")
 
 ### 段落 1：文生视频
 
-```
-kling_generate(
-    prompt="<段落1的可灵Prompt>",
-    duration=10, aspect_ratio="9:16", mode="pro",
-    motion_has_audio=true,
-    kling_elements=[<角色参考图片列表，如有>]
-)
+```bash
+python3 ~/.openclaw/skills/douyin-video-forge/scripts/kling_api.py generate \
+  --prompt "<段落1的可灵Prompt>" \
+  --duration 10 --aspect-ratio 9:16 --mode pro
 ```
 
-工具内置自动轮询，完成后返回视频下载 URL。
+脚本内置自动轮询，完成后返回 JSON（含 video_url）。
 
 ### 审核模式
 
@@ -408,29 +422,38 @@ kling_generate(
 
 每个后续段落执行两步操作：
 
-```
+```bash
 # 第一步：提取上一段最后一帧
-kling_extract_frame(video_path="<上一段视频路径>", position="last")
+python3 ~/.openclaw/skills/douyin-video-forge/scripts/kling_api.py extract-frame \
+  --video "<上一段视频路径>" --position last
 
 # 第二步：以末帧为首帧生成下一段
-kling_generate_with_image(
-    prompt="<当前段落的可灵Prompt>",
-    image="<上一段最后一帧图片路径>",
-    duration=10, aspect_ratio="9:16", mode="pro",
-    motion_has_audio=true,
-    kling_elements=[<角色参考图片列表，如有>]
-)
+python3 ~/.openclaw/skills/douyin-video-forge/scripts/kling_api.py generate-with-image \
+  --prompt "<当前段落的可灵Prompt>" \
+  --image "<上一段最后一帧图片路径>" \
+  --duration 10 --aspect-ratio 9:16 --mode pro
 ```
 
 重复此流程直到所有段落完成。逐段确认模式下每段展示供运营审核。
 
 ### 角色一致性
 
-通过 `kling_elements` 传入 2-50 张参考图片。Phase 5 开始前询问运营是否需要上传。
+通过 `--kling-elements` 传入参考图片 URL 列表。Phase 5 开始前询问运营是否需要上传。
+
+```bash
+python3 ~/.openclaw/skills/douyin-video-forge/scripts/kling_api.py generate \
+  --prompt "<prompt>" --duration 10 --aspect-ratio 9:16 --mode pro \
+  --kling-elements "url1" "url2" "url3"
+```
 
 ### 手动状态查询
 
-`kling_check_status(task_id="<ID>")` — 返回状态 + 视频 URL。
+```bash
+python3 ~/.openclaw/skills/douyin-video-forge/scripts/kling_api.py check-status \
+  --task-id "<ID>"
+```
+
+返回 JSON（task_id, status, video_url）。
 
 ---
 
@@ -438,14 +461,24 @@ kling_generate_with_image(
 
 将所有段落视频按顺序拼接：
 
-```
-video_concat(video_paths=["<段落1>", "<段落2>", ...], output_path="<输出路径>")
+```bash
+# 创建 filelist
+TMPDIR=$(mktemp -d -t dvf_concat_XXXX)
+for f in "<视频1>" "<视频2>" "<视频3>"; do
+  echo "file '$f'" >> "$TMPDIR/filelist.txt"
+done
+
+# 无 BGM 拼接
+ffmpeg -f concat -safe 0 -i "$TMPDIR/filelist.txt" -c copy "<输出路径>" -y
 ```
 
 可选 BGM 叠加：
 
-```
-video_concat(video_paths=[...], output_path="<路径>", bgm_path="<BGM路径>", bgm_volume=0.3)
+```bash
+# 有 BGM 拼接
+ffmpeg -f concat -safe 0 -i "$TMPDIR/filelist.txt" -i "<BGM路径>" \
+  -filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2,volume=0.3[a]" \
+  -map 0:v -map "[a]" -c:v copy "<输出路径>" -y
 ```
 
 完成后向运营展示：文件路径、时长、分辨率（1080x1920 竖屏）。
@@ -514,5 +547,5 @@ Cron 触发
 - **Kling 生成失败**：展示错误，建议调整 prompt 或切换 Seedance
 - **网络超时**：自动重试 1 次，仍失败提示检查网络
 - **热榜无交集**：基于行业趋势生成，不强蹭无关热点
-- **段落过渡不自然**：调整 prompt 或使用 `kling_elements` 增强一致性
+- **段落过渡不自然**：调整 prompt 或使用 `--kling-elements` 增强一致性
 - **音频不连续**：建议 BGM 叠加模式覆盖原生音频
