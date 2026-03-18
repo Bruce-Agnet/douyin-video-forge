@@ -87,14 +87,17 @@ async def video_concat(
 
 @video_server.tool()
 async def env_check() -> dict[str, Any]:
-    """检查运行环境配置状态（Python/FFmpeg/API Key/网络连通性）。
+    """检查运行环境配置状态，返回三个就绪标志。
 
-    返回 phase1_ready（数据采集+脚本生成）和 phase2_ready（视频生成）两个就绪标志。
+    - data_ready: 数据采集+脚本生成（Python 3.10+ / FFmpeg / yt-dlp）— 不需要任何 API Key
+    - video_ready: AI 视频生成（Kling API Key + 连通性）
+    - voice_ready: 语音转写（faster-whisper 可导入）
     """
     result: dict[str, Any] = {}
 
     # Python 版本
     result["python_version"] = sys.version
+    python_ok = sys.version_info >= (3, 10)
 
     # FFmpeg 可用性
     ffmpeg_path = shutil.which("ffmpeg")
@@ -105,45 +108,46 @@ async def env_check() -> dict[str, Any]:
     else:
         result["ffmpeg"] = {"available": False, "message": "未找到 ffmpeg，请安装后重试"}
 
-    # API Key 配置状态（区分一期必需 / 二期可选）
-    tikhub_configured = bool(os.environ.get("TIKHUB_API_KEY"))
+    # yt-dlp 可用性
+    ytdlp_path = shutil.which("yt-dlp")
+    if ytdlp_path:
+        proc = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True)
+        result["yt_dlp"] = {"available": True, "version": proc.stdout.strip()}
+    else:
+        result["yt_dlp"] = {"available": False, "message": "未找到 yt-dlp，请运行: pip install yt-dlp"}
+
+    # faster-whisper 可用性
+    try:
+        import faster_whisper  # noqa: F401
+        result["faster_whisper"] = {"available": True}
+    except ImportError:
+        result["faster_whisper"] = {
+            "available": False,
+            "message": "未安装 faster-whisper，语音转写不可用。安装: pip install faster-whisper",
+        }
+
+    # Kling API Key 配置状态
     kling_access_configured = bool(os.environ.get("KLING_ACCESS_KEY"))
     kling_secret_configured = bool(os.environ.get("KLING_SECRET_KEY"))
     kling_configured = kling_access_configured and kling_secret_configured
 
     result["api_keys"] = {
-        "TIKHUB_API_KEY": {
-            "status": "已配置" if tikhub_configured else "未配置",
-            "required": True,
-            "note": "数据采集必需" if not tikhub_configured else "",
-        },
         "KLING_ACCESS_KEY": {
             "status": "已配置" if kling_access_configured else "未配置",
             "required": False,
-            "note": "" if kling_access_configured else "仅视频生成需要（二期）",
+            "note": "" if kling_access_configured else "仅视频生成需要",
         },
         "KLING_SECRET_KEY": {
             "status": "已配置" if kling_secret_configured else "未配置",
             "required": False,
-            "note": "" if kling_secret_configured else "仅视频生成需要（二期）",
+            "note": "" if kling_secret_configured else "仅视频生成需要",
         },
     }
 
-    # 网络连通性
+    # 网络连通性 — 仅检查 Kling（数据采集由浏览器完成，无需 API 连通性检查）
     connectivity: dict[str, Any] = {}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-        # TikHub
-        try:
-            resp = await client.get("https://api.tikhub.io/api/v1/health")
-            connectivity["tikhub"] = {
-                "reachable": True,
-                "status_code": resp.status_code,
-            }
-        except Exception as e:
-            connectivity["tikhub"] = {"reachable": False, "error": str(e)}
-
-        # Kling — 无密钥时跳过连通性检查
-        if kling_configured:
+    if kling_configured:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             try:
                 resp = await client.get("https://api.klingai.com")
                 connectivity["kling"] = {
@@ -152,13 +156,27 @@ async def env_check() -> dict[str, Any]:
                 }
             except Exception as e:
                 connectivity["kling"] = {"reachable": False, "error": str(e)}
-        else:
-            connectivity["kling"] = {"reachable": False, "skipped": True, "message": "跳过 — 未配置密钥"}
+    else:
+        connectivity["kling"] = {"reachable": False, "skipped": True, "message": "跳过 — 未配置密钥"}
 
     result["connectivity"] = connectivity
 
-    # 就绪标志
-    result["phase1_ready"] = tikhub_configured and connectivity.get("tikhub", {}).get("reachable", False)
-    result["phase2_ready"] = kling_configured and connectivity.get("kling", {}).get("reachable", False)
+    # 三个就绪标志
+    result["data_ready"] = python_ok and bool(ffmpeg_path) and bool(ytdlp_path)
+    result["video_ready"] = kling_configured and connectivity.get("kling", {}).get("reachable", False)
+    result["voice_ready"] = result["faster_whisper"]["available"]
+
+    # 故障排除指引
+    issues = []
+    if not python_ok:
+        issues.append("Python 版本需 >= 3.10")
+    if not ffmpeg_path:
+        issues.append("缺少 FFmpeg: brew install ffmpeg (macOS) / apt install ffmpeg (Linux)")
+    if not ytdlp_path:
+        issues.append("缺少 yt-dlp: pip install yt-dlp")
+    if not result["voice_ready"]:
+        issues.append("语音转写不可用（可选）: pip install faster-whisper")
+    if issues:
+        result["troubleshooting"] = issues
 
     return result

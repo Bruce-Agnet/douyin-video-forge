@@ -90,6 +90,7 @@ fi
 echo -e "${BOLD}${CYAN}"
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║     douyin-video-forge OpenClaw Skill 安装程序      ║"
+echo "║                    v2.0                             ║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -113,7 +114,6 @@ if [[ -z "$OPENCLAW_VERSION" ]]; then
     warn "无法解析 openclaw 版本号，继续安装..."
 elif ! version_gte "$OPENCLAW_VERSION" "$REQUIRED_OPENCLAW_VERSION"; then
     error "OpenClaw 版本过低: $OPENCLAW_VERSION (需要 >= $REQUIRED_OPENCLAW_VERSION)"
-    warn "⚠ 旧版本存在安全风险，请升级到最新版本"
     echo -e "  请升级: ${CYAN}openclaw update${NC}"
     exit 1
 else
@@ -185,8 +185,7 @@ if $IN_DOCKER; then
     warn "检测到 Docker 环境，正在配置..."
     export OPENCLAW_DOCKER_APT_PACKAGES="ffmpeg"
     info "已设置 OPENCLAW_DOCKER_APT_PACKAGES=\"ffmpeg\""
-    info "请确保容器具有出站网络访问权限（TikHub API / Kling API）"
-    # 写入 Docker 环境标记文件
+    info "请确保容器具有出站网络访问权限（Kling API）"
     echo "OPENCLAW_DOCKER_APT_PACKAGES=ffmpeg" > "$SKILL_DIR/.docker_env"
     success "Docker 环境配置完成"
 else
@@ -194,35 +193,44 @@ else
 fi
 
 # ----------------------------------------------------------
-# 步骤 5: FFmpeg 检查
+# 步骤 5: FFmpeg / yt-dlp 检查
 # ----------------------------------------------------------
-step 5 "检查 FFmpeg"
+step 5 "检查 FFmpeg 和 yt-dlp"
 
 if command -v ffmpeg &>/dev/null; then
     FFMPEG_VERSION=$(ffmpeg -version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
     success "FFmpeg 已安装 (版本: $FFMPEG_VERSION)"
 else
     warn "未检测到 FFmpeg，视频处理功能需要 FFmpeg"
-    echo ""
     OS_TYPE="$(uname -s)"
     case "$OS_TYPE" in
-        Darwin)
-            echo -e "  macOS 安装方法:"
-            echo -e "  ${CYAN}brew install ffmpeg${NC}"
-            ;;
-        Linux)
-            echo -e "  Linux (Debian/Ubuntu) 安装方法:"
-            echo -e "  ${CYAN}sudo apt update && sudo apt install -y ffmpeg${NC}"
-            echo ""
-            echo -e "  Linux (CentOS/RHEL) 安装方法:"
-            echo -e "  ${CYAN}sudo yum install -y ffmpeg${NC}"
-            ;;
-        *)
-            echo -e "  请手动安装 FFmpeg: ${CYAN}https://ffmpeg.org/download.html${NC}"
-            ;;
+        Darwin) echo -e "  安装: ${CYAN}brew install ffmpeg${NC}" ;;
+        Linux)  echo -e "  安装: ${CYAN}sudo apt install -y ffmpeg${NC}" ;;
+        *)      echo -e "  请手动安装: ${CYAN}https://ffmpeg.org/download.html${NC}" ;;
     esac
-    echo ""
     warn "你可以稍后安装 FFmpeg，安装将继续..."
+fi
+
+if command -v yt-dlp &>/dev/null; then
+    YTDLP_VERSION=$(yt-dlp --version 2>/dev/null)
+    success "yt-dlp 已安装 (版本: $YTDLP_VERSION)"
+else
+    warn "未检测到 yt-dlp，正在尝试安装..."
+    if python3 -m pip install yt-dlp --quiet 2>/dev/null; then
+        success "yt-dlp 安装成功"
+    else
+        warn "yt-dlp 安装失败，请手动运行: pip install yt-dlp"
+    fi
+fi
+
+# 可选：检查 faster-whisper
+info "检查 faster-whisper（可选，用于语音转写）..."
+if python3 -c "import faster_whisper" 2>/dev/null; then
+    success "faster-whisper 已安装"
+else
+    info "faster-whisper 未安装（语音转写不可用）"
+    echo -e "  安装: ${CYAN}pip install faster-whisper${NC}"
+    echo -e "  注意：首次转写时会自动下载 ~1.5GB 模型"
 fi
 
 # ----------------------------------------------------------
@@ -258,7 +266,7 @@ fi
 tmp=$(mktemp)
 jq '.mcpServers //= {}' "$OPENCLAW_CONFIG" > "$tmp" && mv "$tmp" "$OPENCLAW_CONFIG"
 
-# 写入 MCP 服务器基础配置（不含 env，env 在步骤 8 写入）
+# 写入 MCP 服务器基础配置
 tmp=$(mktemp)
 jq --arg name "$SKILL_NAME" \
    --arg cmd "python3" \
@@ -278,25 +286,17 @@ success "MCP 服务器配置已写入 $OPENCLAW_CONFIG"
 step 7 "配置 API 密钥"
 
 echo ""
-info "请提供以下 API 密钥（留空可稍后手动配置）"
-echo ""
-
-# --- TikHub API Key ---
-echo -e "${BOLD}TikHub API Key${NC}"
-echo -e "  用于抖音视频数据获取"
-echo -e "  获取地址: ${CYAN}https://tikhub.io${NC}"
-read -r -p "$(echo -e "  ${YELLOW}TIKHUB_API_KEY: ${NC}")" TIKHUB_API_KEY
-echo ""
-
-# --- Kling API Keys ---
-echo -e "${BOLD}Kling AI API Keys${NC} ${YELLOW}(可选 - 用于 AI 视频生成)${NC}"
+info "Kling AI API 密钥（可选 — 用于 AI 视频生成）"
 echo -e "  获取地址: ${CYAN}https://klingai.com${NC}"
+echo -e "  留空可稍后手动配置，数据采集和脚本生成无需 API Key"
+echo ""
+
 read -r -p "$(echo -e "  ${YELLOW}KLING_ACCESS_KEY: ${NC}")" KLING_ACCESS_KEY
 read -r -p "$(echo -e "  ${YELLOW}KLING_SECRET_KEY: ${NC}")" KLING_SECRET_KEY
 echo ""
 
 if [[ -z "$KLING_ACCESS_KEY" || -z "$KLING_SECRET_KEY" ]]; then
-    warn "未配置 Kling API 密钥，AI 视频生成功能将不可用"
+    info "未配置 Kling API 密钥 — 数据采集和脚本生成仍可正常使用"
 fi
 
 # ----------------------------------------------------------
@@ -306,9 +306,6 @@ step 8 "保存 API 密钥到配置文件"
 
 # 构建 env 对象
 ENV_JSON="{}"
-if [[ -n "$TIKHUB_API_KEY" ]]; then
-    ENV_JSON=$(echo "$ENV_JSON" | jq --arg k "$TIKHUB_API_KEY" '. + {"TIKHUB_API_KEY": $k}')
-fi
 if [[ -n "$KLING_ACCESS_KEY" ]]; then
     ENV_JSON=$(echo "$ENV_JSON" | jq --arg k "$KLING_ACCESS_KEY" '. + {"KLING_ACCESS_KEY": $k}')
 fi
@@ -328,13 +325,10 @@ jq --arg name "$SKILL_NAME" \
    '.mcpServers[$name].env = (.mcpServers[$name].env // {} | . * $env)' \
    "$OPENCLAW_CONFIG" > "$tmp" && mv "$tmp" "$OPENCLAW_CONFIG"
 
-# 显示密钥配置状态
-TIKHUB_STATUS="${RED}未配置${NC}"
 KLING_STATUS="${RED}未配置${NC}"
-[[ -n "$TIKHUB_API_KEY" ]] && TIKHUB_STATUS="${GREEN}已配置${NC}"
 [[ -n "$KLING_ACCESS_KEY" && -n "$KLING_SECRET_KEY" ]] && KLING_STATUS="${GREEN}已配置${NC}"
 
-success "API 密钥已保存"
+success "配置已保存"
 
 # ----------------------------------------------------------
 # 步骤 9: 启动验证
@@ -348,7 +342,6 @@ VERIFY_OK=true
 if (cd "$SKILL_DIR" && python3 -c "import mcp_server" 2>/dev/null); then
     success "MCP 服务器模块导入成功"
 else
-    # 尝试更宽松的验证 - 检查入口文件是否存在
     if [[ -f "$SKILL_DIR/mcp_server/server.py" ]]; then
         success "MCP 服务器入口文件存在"
     else
@@ -363,7 +356,6 @@ if $VERIFY_OK; then
     if timeout 5 bash -c "cd '$SKILL_DIR' && python3 -c 'from mcp_server.server import mcp; print(\"OK\")'" 2>/dev/null; then
         success "MCP 服务器启动验证通过"
     else
-        # timeout 返回 124 表示超时（正常，说明服务器在运行）
         EXIT_CODE=$?
         if [[ $EXIT_CODE -eq 124 ]]; then
             success "MCP 服务器可以正常启动"
@@ -380,13 +372,13 @@ step 10 "安装完成"
 
 echo ""
 echo -e "${BOLD}${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${GREEN}║         安装成功！                                  ║${NC}"
+echo -e "${BOLD}${GREEN}║         安装成功！(v2.0)                            ║${NC}"
 echo -e "${BOLD}${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${BOLD}安装路径:${NC}       $SKILL_DIR"
 echo -e "  ${BOLD}配置文件:${NC}       $OPENCLAW_CONFIG"
-echo -e "  ${BOLD}TikHub API:${NC}     $TIKHUB_STATUS"
 echo -e "  ${BOLD}Kling AI API:${NC}   $KLING_STATUS"
+echo -e "  ${BOLD}数据采集:${NC}       ${GREEN}浏览器模式（无需 API Key）${NC}"
 echo ""
 echo -e "${BOLD}${CYAN}快速开始:${NC}"
 echo -e "  在 OpenClaw 中输入 ${GREEN}'帮我制作抖音短视频'${NC} 即可开始"
